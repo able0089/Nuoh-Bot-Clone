@@ -3,6 +3,8 @@ import express from 'express';
 import https from 'https';
 import http from 'http';
 
+console.log('Bot starting...');
+
 const app = express();
 const PORT = process.env.PORT || 5000;
 
@@ -415,8 +417,13 @@ client.once('ready', () => {
     console.log(`Logged in as ${client.user.tag}!`);
 });
 
-if (process.env.DISCORD_TOKEN) {
-    client.login(process.env.DISCORD_TOKEN).catch(console.error);
+if (process.env.TOKEN) {
+    console.log('Logging into Discord...');
+    client.login(process.env.TOKEN).catch((err) => {
+        console.error('Failed to log in:', err.message);
+        process.exit(1);
+    });
 } else {
-    console.log('No DISCORD_TOKEN provided. Bot will not connect to Discord.');
+    console.error('No TOKEN provided. Set the TOKEN environment variable.');
+    process.exit(1);
 }
