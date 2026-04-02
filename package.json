@@ -1,15 +1,15 @@
 {
-  "name": "workspace",
-  "version": "0.0.0",
+  "name": "nuoh-bot",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "index.js",
   "license": "MIT",
   "scripts": {
-    "build": "pnpm run typecheck && pnpm -r --if-present run build",
-    "typecheck:libs": "tsc --build",
-    "typecheck": "pnpm run typecheck:libs && pnpm -r --filter \"./artifacts/**\" --filter \"./scripts\" --if-present run typecheck"
+    "start": "node index.js",
+    "dev": "node index.js"
   },
-  "private": true,
-  "devDependencies": {
-    "typescript": "~5.9.2",
-    "prettier": "^3.8.1"
+  "dependencies": {
+    "discord.js": "^14.25.1",
+    "express": "^5.2.1"
   }
 }
