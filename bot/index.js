@@ -8,6 +8,10 @@ const PORT = process.env.PORT || 5000;
 
 let ignoredChannels = new Set();
 let isBotOffline = false;
+let logChannelId = null;
+
+// Maps lockedChannelId -> log message in the log channel
+const channelLockLogs = new Map();
 
 app.get('/', (req, res) => {
     res.send('Nuoh is running');
@@ -58,6 +62,59 @@ function parseTime(timeStr) {
     return value * multiplier[unit];
 }
 
+function reasonLabel(type) {
+    if (type === 'shiny') return 'Shiny Hunt';
+    if (type === 'rare') return 'Rare Spawn';
+    if (type === 'regional') return 'Regional Spawn';
+    return 'Unknown';
+}
+
+async function sendLockLog(channel, type, pingedUserId = null) {
+    if (!logChannelId) return null;
+    try {
+        const logChannel = client.channels.cache.get(logChannelId);
+        if (!logChannel) return null;
+
+        const embed = new EmbedBuilder()
+            .setTitle('Channel Locked')
+            .addFields(
+                { name: 'Channel', value: `<#${channel.id}>` },
+                { name: 'Reason', value: reasonLabel(type) }
+            )
+            .setColor(0xFF4444)
+            .setTimestamp();
+
+        if (type === 'shiny' && pingedUserId) {
+            embed.addFields({ name: 'Hunter', value: `<@${pingedUserId}>` });
+        }
+
+        const logMsg = await logChannel.send({ embeds: [embed] });
+        return logMsg;
+    } catch (err) {
+        console.error('Log send error:', err);
+        return null;
+    }
+}
+
+async function editLockLogUnlocked(channelId, unlockedByUsername, auto = false) {
+    const logMsg = channelLockLogs.get(channelId);
+    if (!logMsg) return;
+    try {
+        const existing = logMsg.embeds[0];
+        const updated = EmbedBuilder.from(existing)
+            .setTitle('Channel Unlocked')
+            .setColor(0x44FF88)
+            .addFields({
+                name: auto ? 'Auto-unlocked' : 'Unlocked by',
+                value: auto ? 'After 12 hours (no action taken)' : `@${unlockedByUsername}`
+            });
+        await logMsg.edit({ embeds: [updated] });
+        channelLockLogs.delete(channelId);
+    } catch (err) {
+        console.error('Log edit error:', err);
+    }
+}
+
 async function lockChannel(channel, type, pingedUserId = null) {
     try {
         if (!channel.isTextBased() || channel.isDMBased()) return;
@@ -98,7 +155,11 @@ async function lockChannel(channel, type, pingedUserId = null) {
 
         const lockMessage = await channel.send({ embeds: [embed], components: [row] });
 
-        // Auto-unlock after 12 hours if nobody clicked
+        // Send log
+        const logMsg = await sendLockLog(channel, type, pingedUserId);
+        if (logMsg) channelLockLogs.set(channel.id, logMsg);
+
+        // Auto-unlock after 12 hours
         setTimeout(async () => {
             try {
                 const fetchedMsg = await channel.messages.fetch(lockMessage.id).catch(() => null);
@@ -108,6 +169,7 @@ async function lockChannel(channel, type, pingedUserId = null) {
                         .addComponents(ButtonBuilder.from(fetchedMsg.components[0].components[0]).setDisabled(true));
                     await fetchedMsg.edit({ components: [disabledRow] });
                     await channel.send('The spawn has been automatically unlocked after 12 hours.');
+                    await editLockLogUnlocked(channel.id, null, true);
                 }
             } catch (err) {
                 console.error('Auto-unlock error:', err);
@@ -170,6 +232,7 @@ client.on('messageCreate', async (message) => {
                     { name: 'lock channel | Regional Spawn', value: 'Manually trigger a Regional lock.' },
                     { name: 'lock channel | shinyhunt @user', value: 'Manually trigger a Shiny Hunt lock.' },
                     { name: 'remind <time> <reason>', value: 'Set a reminder (e.g., 10s, 5m, 1h).' },
+                    { name: 'log redirect #channel', value: 'Set the log channel (Owner only).' },
                 )
                 .setColor(0x00FFFF)
                 .setFooter({ text: 'Page 2/2' });
@@ -187,6 +250,21 @@ client.on('messageCreate', async (message) => {
                 );
 
             return message.reply({ embeds: [page1], components: [row], allowedMentions: { repliedUser: false } });
+        }
+
+        if (command === 'log') {
+            const sub = args[1]?.toLowerCase();
+            if (sub === 'redirect') {
+                if (message.author.id !== OWNER_ID) {
+                    return message.reply({ content: 'You don\'t have permissions to run this command', allowedMentions: { repliedUser: false } });
+                }
+                const mentioned = message.mentions.channels.first();
+                if (!mentioned) {
+                    return message.reply({ content: `Usage: ${PREFIX}log redirect #channel`, allowedMentions: { repliedUser: false } });
+                }
+                logChannelId = mentioned.id;
+                return message.reply({ content: `Logs will now be sent to <#${mentioned.id}>`, allowedMentions: { repliedUser: false } });
+            }
         }
 
         if (command === 'remind') {
@@ -282,6 +360,9 @@ client.on('interactionCreate', async (interaction) => {
 
             await interaction.update({ components: [disabledRow] });
             await channel.send(`The spawn has been unlocked by <@${interaction.user.id}>`);
+
+            // Update log
+            await editLockLogUnlocked(channel.id, interaction.user.username, false);
         } catch (error) {
             console.error('Error unlocking spawn:', error);
             await interaction.reply({ content: 'Failed to unlock the spawn.', ephemeral: true });
@@ -305,6 +386,7 @@ client.on('interactionCreate', async (interaction) => {
                 { name: 'lock channel | Regional Spawn', value: 'Manually trigger a Regional lock.' },
                 { name: 'lock channel | shinyhunt @user', value: 'Manually trigger a Shiny Hunt lock.' },
                 { name: 'remind <time> <reason>', value: 'Set a reminder (e.g., 10s, 5m, 1h).' },
+                { name: 'log redirect #channel', value: 'Set the log channel (Owner only).' },
             )
             .setColor(0x00FFFF)
             .setFooter({ text: 'Page 2/2' });

@@ -2,6 +2,7 @@ services:
   - type: web
     name: nuoh-bot
     runtime: node
+    rootDir: .
     buildCommand: npm install
     startCommand: npm start
     envVars:
