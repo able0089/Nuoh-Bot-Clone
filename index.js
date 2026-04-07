@@ -10,7 +10,6 @@ import {
     ActionRowBuilder,
     ButtonBuilder,
     ButtonStyle,
-    ChannelType,
 } from 'discord.js';
 import keepAlive from './keep_alive.js';
 import { getGuild, saveGuild, getWarnings, addWarning } from './storage.js';
@@ -460,37 +459,27 @@ async function handlePrefix(message, commandBody) {
 
     // ── help ──
     if (command === 'help') {
-        const page1 = new EmbedBuilder()
-            .setTitle('Hi, I am Nuoh!')
-            .setDescription(`WooperLand's spawn locking bot, made by <@${OWNER_ID}>.\n\nI lock channels when rare or shiny Pokémon spawn.\n\n**Prefix:** \`${PREFIX}\` or mention me!\n**Also supports slash commands!**`)
-            .setColor(0x00FFFF)
-            .setFooter({ text: 'Page 1/2 • Click below for commands' });
-
-        const page2 = new EmbedBuilder()
+        const embed = new EmbedBuilder()
             .setTitle('Nuoh Commands')
             .addFields(
                 { name: '**🔒 Spawn Management**', value: '\u200b' },
-                { name: 'lock channel | Rare ping', value: 'Manually trigger a Rare lock.' },
-                { name: 'lock channel | Regional Spawn', value: 'Manually trigger a Regional lock.' },
-                { name: 'lock channel | shinyhunt @users', value: 'Manually trigger a Shiny lock.' },
-                { name: 'setbotoffline / setbotonline', value: 'Pause/resume auto-locking (Owner only).' },
+                { name: `\`${PREFIX}lock channel | Rare ping\``, value: 'Manually trigger a Rare lock.' },
+                { name: `\`${PREFIX}lock channel | Regional Spawn\``, value: 'Manually trigger a Regional lock.' },
+                { name: `\`${PREFIX}lock channel | shinyhunt @users\``, value: 'Manually trigger a Shiny lock.' },
+                { name: `\`${PREFIX}setbotoffline\` / \`${PREFIX}setbotonline\``, value: 'Pause or resume auto-locking (Owner only).' },
                 { name: '**⚖️ Moderation**', value: '\u200b' },
-                { name: 'timeout/to @user|ID [time] [reason]', value: 'Timeout a member.' },
-                { name: 'warn @user|ID [reason]', value: 'Warn a member. 1=10m, 2=1h, 3+=12h.' },
+                { name: `\`${PREFIX}timeout @user|ID [time] [reason]\``, value: 'Timeout a member. Also: `nu!to`' },
+                { name: `\`${PREFIX}warn @user|ID [reason]\``, value: '1st warn = 10min, 2nd = 1h, 3rd+ = 12h timeout.' },
                 { name: '**⚙️ Config**', value: '\u200b' },
-                { name: 'setlog #channel', value: 'Set log channel (Admin/Owner only).' },
-                { name: 'settings', value: 'View bot settings for this server.' },
-                { name: 'remind <time> <reason>', value: 'Set a reminder (10s, 5m, 1h...).' },
+                { name: `\`${PREFIX}setlog #channel\``, value: 'Set the log channel (Admin/Owner only).' },
+                { name: `\`${PREFIX}settings\``, value: 'View current bot settings for this server.' },
+                { name: `\`${PREFIX}remind <time> <reason>\``, value: 'Set a reminder. Supports: 10s, 5m, 1h, 1d.' },
+                { name: '**Slash Commands**', value: '`/setmod` `/moderate` `/timeout` `/warn` `/settings`' },
             )
             .setColor(0x00FFFF)
-            .setFooter({ text: 'Page 2/2 • Use /setmod and /moderate to configure per-server settings' });
+            .setFooter({ text: `Prefix: ${PREFIX} — or mention me!` });
 
-        const row = new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setCustomId('help_page_1').setLabel('About Me').setStyle(ButtonStyle.Secondary),
-            new ButtonBuilder().setCustomId('help_page_2').setLabel('Commands').setStyle(ButtonStyle.Primary),
-        );
-
-        return message.reply({ embeds: [page1], components: [row], allowedMentions: { repliedUser: false } });
+        return message.reply({ embeds: [embed], allowedMentions: { repliedUser: false } });
     }
 
     // ── settings ──
@@ -723,44 +712,6 @@ client.on('interactionCreate', async (interaction) => {
         return;
     }
 
-    // Help page navigation
-    if (interaction.customId === 'help_page_1' || interaction.customId === 'help_page_2') {
-        const page1 = new EmbedBuilder()
-            .setTitle('Hi, I am Nuoh!')
-            .setDescription(`WooperLand's spawn locking bot, made by <@${OWNER_ID}>.\n\nI lock channels when rare or shiny Pokémon spawn, ensuring the right players get a fair chance.\n\n**Prefix:** \`${PREFIX}\` or mention me!\n**Also supports slash commands!**`)
-            .setColor(0x00FFFF)
-            .setFooter({ text: 'Page 1/2' });
-
-        const page2 = new EmbedBuilder()
-            .setTitle('Nuoh Commands')
-            .addFields(
-                { name: '**🔒 Spawn Management**', value: '\u200b' },
-                { name: 'lock channel | Rare ping', value: 'Manually trigger a Rare lock.' },
-                { name: 'lock channel | Regional Spawn', value: 'Manually trigger a Regional lock.' },
-                { name: 'lock channel | shinyhunt @users', value: 'Manually trigger a Shiny lock.' },
-                { name: 'setbotoffline / setbotonline', value: 'Pause/resume auto-locking (Owner only).' },
-                { name: '**⚖️ Moderation**', value: '\u200b' },
-                { name: 'timeout/to @user|ID [time] [reason]', value: 'Timeout a member.' },
-                { name: 'warn @user|ID [reason]', value: 'Warn a member. 1=10m, 2=1h, 3+=12h.' },
-                { name: '**⚙️ Config**', value: '\u200b' },
-                { name: 'setlog #channel', value: 'Set log channel (Admin/Owner only).' },
-                { name: 'settings', value: 'View bot settings for this server.' },
-                { name: 'remind <time> <reason>', value: 'Set a reminder (10s, 5m, 1h...).' },
-            )
-            .setColor(0x00FFFF)
-            .setFooter({ text: 'Page 2/2' });
-
-        const row = new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setCustomId('help_page_1').setLabel('About Me').setStyle(ButtonStyle.Secondary),
-            new ButtonBuilder().setCustomId('help_page_2').setLabel('Commands').setStyle(ButtonStyle.Primary),
-        );
-
-        if (interaction.customId === 'help_page_1') {
-            await interaction.update({ embeds: [page1], components: [row] });
-        } else {
-            await interaction.update({ embeds: [page2], components: [row] });
-        }
-    }
 });
 
 // ─── Ready ────────────────────────────────────────────────────────────────────
