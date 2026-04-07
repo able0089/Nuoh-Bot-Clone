@@ -136,9 +136,8 @@ function hasModPermission(member, guildData) {
 }
 
 function isChannelMonitored(channel, guildData) {
-    // If nothing configured, monitor everywhere (backwards compatible)
     if (guildData.moderatedChannels.length === 0 && guildData.moderatedCategories.length === 0) {
-        return true;
+        return false;
     }
     if (guildData.moderatedChannels.includes(channel.id)) return true;
     if (channel.parentId && guildData.moderatedCategories.includes(channel.parentId)) return true;
