@@ -33,9 +33,15 @@ export function getGuild(guildId) {
             moderatedChannels: [],
             moderatedCategories: [],
             warnings: {},
+            lockTypes: { rare: true, shiny: true, regional: true },
+            channelLockTypes: {},
         };
     }
-    return store[guildId];
+    // Patch older records that are missing the new fields
+    const g = store[guildId];
+    if (!g.lockTypes) g.lockTypes = { rare: true, shiny: true, regional: true };
+    if (!g.channelLockTypes) g.channelLockTypes = {};
+    return g;
 }
 
 export function saveGuild(guildId, guildData) {
@@ -50,6 +56,13 @@ export function getWarnings(guildId, userId) {
 export function addWarning(guildId, userId) {
     const guild = getGuild(guildId);
     guild.warnings[userId] = (guild.warnings[userId] || 0) + 1;
+    saveGuild(guildId, guild);
+    return guild.warnings[userId];
+}
+
+export function setWarnings(guildId, userId, count) {
+    const guild = getGuild(guildId);
+    guild.warnings[userId] = Math.max(0, count);
     saveGuild(guildId, guild);
     return guild.warnings[userId];
 }

@@ -12,20 +12,27 @@ import {
     ButtonStyle,
 } from 'discord.js';
 import keepAlive from './keep_alive.js';
-import { getGuild, saveGuild, getWarnings, addWarning } from './storage.js';
+import { getGuild, saveGuild, getWarnings, addWarning, setWarnings } from './storage.js';
 
 console.log('Bot starting...');
 keepAlive();
+
+// ─── Crash protection ─────────────────────────────────────────────────────────
+process.on('uncaughtException', (err) => {
+    console.error('[Uncaught Exception]', err);
+});
+process.on('unhandledRejection', (reason) => {
+    console.error('[Unhandled Rejection]', reason);
+});
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const PREFIX = 'nu!';
 const OWNER_ID = '1396815034247806999';
 const TARGET_USER_ID = '716390085896962058'; // Pokétwo bot
 
-// Per-guild: track whether auto-locking is paused
 const botOfflineGuilds = new Set();
 
-// Per-channel active lock data: channelId → { hunters, type, logMsg }
+// Per-channel active lock data: channelId → { hunters, isHunterType, type, logMsg, lockMessage }
 const activeLocks = new Map();
 
 // ─── Client ───────────────────────────────────────────────────────────────────
@@ -119,7 +126,7 @@ function warnToLabel(count) {
 }
 
 function reasonLabel(type) {
-    const map = { shiny: 'Shiny Hunt', rare: 'Rare Spawn', regional: 'Regional Spawn', collection: 'Collection Ping' };
+    const map = { shiny: 'Shiny Hunt', rare: 'Rare Spawn', regional: 'Regional Spawn' };
     return map[type] || 'Unknown';
 }
 
@@ -142,6 +149,28 @@ function isChannelMonitored(channel, guildData) {
     if (guildData.moderatedChannels.includes(channel.id)) return true;
     if (channel.parentId && guildData.moderatedCategories.includes(channel.parentId)) return true;
     return false;
+}
+
+// Check if a specific lock type is enabled — channel setting overrides guild setting
+function isLockEnabled(guildData, channelId, type) {
+    const chSetting = guildData.channelLockTypes?.[channelId];
+    if (chSetting && typeof chSetting[type] === 'boolean') return chSetting[type];
+    const guildSetting = guildData.lockTypes?.[type];
+    if (typeof guildSetting === 'boolean') return guildSetting;
+    return true;
+}
+
+// Extract user IDs mentioned only on the line containing a keyword
+// e.g. extractLineIds(content, 'Shiny hunt pings:') won't include IDs from the Collection line
+function extractLineIds(content, keyword) {
+    const lower = content.toLowerCase();
+    const idx = lower.indexOf(keyword.toLowerCase());
+    if (idx === -1) return [];
+    const after = content.slice(idx + keyword.length);
+    const lineEnd = after.indexOf('\n');
+    const line = lineEnd === -1 ? after : after.slice(0, lineEnd);
+    const matches = line.match(/<@!?(\d+)>/g) || [];
+    return matches.map(m => m.replace(/<@!?/, '').replace('>', ''));
 }
 
 // ─── Logging ──────────────────────────────────────────────────────────────────
@@ -174,13 +203,20 @@ function buildSettingsEmbed(guildData, guild) {
 
     const channelStr = guildData.moderatedChannels.length > 0
         ? guildData.moderatedChannels.map(id => `<#${id}>`).join(', ')
-        : 'All channels (none configured)';
+        : 'None configured';
 
     const categoryStr = guildData.moderatedCategories.length > 0
         ? guildData.moderatedCategories.map(id => `\`${id}\``).join(', ')
         : 'None';
 
     const logStr = guildData.logChannelId ? `<#${guildData.logChannelId}>` : 'Not set';
+
+    const lt = guildData.lockTypes || { rare: true, shiny: true, regional: true };
+    const lockStr = [
+        `Shiny: ${lt.shiny ? '✅' : '❌'}`,
+        `Rare: ${lt.rare ? '✅' : '❌'}`,
+        `Regional: ${lt.regional ? '✅' : '❌'}`,
+    ].join('  ');
 
     return new EmbedBuilder()
         .setTitle(`⚙️ Settings — ${guild.name}`)
@@ -189,6 +225,8 @@ function buildSettingsEmbed(guildData, guild) {
             { name: 'Monitored Channels', value: channelStr },
             { name: 'Monitored Categories', value: categoryStr },
             { name: 'Log Channel', value: logStr },
+            { name: 'Server Lock Types', value: lockStr },
+            { name: 'Channel Overrides', value: 'Use `nu!channelsettings` in a channel to view/set per-channel overrides.' },
         )
         .setColor(0x00FFFF)
         .setTimestamp();
@@ -233,25 +271,19 @@ async function lockChannel(channel, type, hunters = [], moderatorId = null) {
     try {
         if (!channel.isTextBased() || channel.isDMBased()) return;
 
-        // Skip if already locked
         const current = channel.permissionOverwrites.cache.get(TARGET_USER_ID);
         if (current && current.deny.has(PermissionsBitField.Flags.SendMessages)) return;
 
         await channel.permissionOverwrites.edit(TARGET_USER_ID, { SendMessages: false });
 
         const hunterMentions = hunters.map(id => `<@${id}>`).join(' ');
-        const isHunterType = type === 'shiny' || type === 'collection';
+        const isHunterType = type === 'shiny';
 
         let title, description;
         if (type === 'shiny') {
             title = '✨ Shiny Hunt Detected';
             description = hunters.length > 0
                 ? `Only pinged hunters can unlock\n${hunterMentions}`
-                : 'Only admins/mods can unlock';
-        } else if (type === 'collection') {
-            title = '📦 Collection Ping Detected';
-            description = hunters.length > 0
-                ? `Only pinged collectors can unlock\n${hunterMentions}`
                 : 'Only admins/mods can unlock';
         } else if (type === 'rare') {
             title = '⭐ Rare Spawn Detected';
@@ -268,7 +300,6 @@ async function lockChannel(channel, type, hunters = [], moderatorId = null) {
             .setFooter({ text: 'click the 🔓 below to unlock' })
             .setColor(0x00FFFF);
 
-        // Use channel.id as key — no customId length issues
         const row = new ActionRowBuilder().addComponents(
             new ButtonBuilder()
                 .setCustomId(`unlock_${channel.id}`)
@@ -279,7 +310,6 @@ async function lockChannel(channel, type, hunters = [], moderatorId = null) {
 
         const lockMessage = await channel.send({ embeds: [embed], components: [row] });
 
-        // Log the lock
         const logEmbed = new EmbedBuilder()
             .setTitle('🔒 Channel Locked')
             .addFields(
@@ -297,8 +327,6 @@ async function lockChannel(channel, type, hunters = [], moderatorId = null) {
         }
 
         const logMsg = await sendLog(channel.guild.id, logEmbed);
-
-        // Store lock data
         activeLocks.set(channel.id, { hunters, type, isHunterType, logMsg, lockMessage });
 
         // Auto-unlock after 12 hours
@@ -328,7 +356,7 @@ async function lockChannel(channel, type, hunters = [], moderatorId = null) {
             }
         }, 12 * 3600000);
 
-        // Reminder at 11 hours for hunter-type locks
+        // 11-hour reminder for shiny
         if (isHunterType && hunters.length > 0) {
             setTimeout(async () => {
                 try {
@@ -353,7 +381,6 @@ async function lockChannel(channel, type, hunters = [], moderatorId = null) {
 async function handleSlash(interaction) {
     const guildData = getGuild(interaction.guildId);
 
-    // /setmod
     if (interaction.commandName === 'setmod') {
         const role = interaction.options.getRole('role');
         if (guildData.modRoles.includes(role.id)) {
@@ -366,17 +393,12 @@ async function handleSlash(interaction) {
         return interaction.reply({ content: `Added <@&${role.id}> as a mod role.` });
     }
 
-    // /moderate
     if (interaction.commandName === 'moderate') {
         const ch = interaction.options.getChannel('channel');
         const catId = interaction.options.getString('category');
-
-        if (!ch && !catId) {
-            return interaction.reply({ content: 'Provide a channel or a category ID.', ephemeral: true });
-        }
+        if (!ch && !catId) return interaction.reply({ content: 'Provide a channel or a category ID.', ephemeral: true });
 
         const replies = [];
-
         if (ch) {
             if (guildData.moderatedChannels.includes(ch.id)) {
                 guildData.moderatedChannels = guildData.moderatedChannels.filter(id => id !== ch.id);
@@ -386,7 +408,6 @@ async function handleSlash(interaction) {
                 replies.push(`Added <#${ch.id}> to monitored channels.`);
             }
         }
-
         if (catId) {
             if (guildData.moderatedCategories.includes(catId)) {
                 guildData.moderatedCategories = guildData.moderatedCategories.filter(id => id !== catId);
@@ -396,30 +417,23 @@ async function handleSlash(interaction) {
                 replies.push(`Added category \`${catId}\` to monitored categories.`);
             }
         }
-
         saveGuild(interaction.guildId, guildData);
         return interaction.reply({ content: replies.join('\n') });
     }
 
-    // /timeout
     if (interaction.commandName === 'timeout') {
         const target = interaction.options.getMember('member');
         const timeStr = interaction.options.getString('time') || '10m';
         const reason = interaction.options.getString('reason') || 'No reason provided';
-
         if (!target) return interaction.reply({ content: 'Member not found in this server.', ephemeral: true });
-
         const ms = parseTime(timeStr);
         if (!ms) return interaction.reply({ content: 'Invalid time. Use formats like: 10m, 1h, 1d', ephemeral: true });
-
         return applyTimeout(target, ms, reason, interaction.user.id, { interaction });
     }
 
-    // /warn
     if (interaction.commandName === 'warn') {
         const target = interaction.options.getMember('member');
         const reason = interaction.options.getString('reason') || 'No reason provided';
-
         if (!target) return interaction.reply({ content: 'Member not found in this server.', ephemeral: true });
 
         const count = addWarning(interaction.guildId, target.id);
@@ -442,7 +456,6 @@ async function handleSlash(interaction) {
         return applyTimeout(target, ms, `Warning #${count}: ${reason}`, interaction.user.id, { interaction });
     }
 
-    // /settings
     if (interaction.commandName === 'settings') {
         return interaction.reply({ embeds: [buildSettingsEmbed(guildData, interaction.guild)] });
     }
@@ -469,9 +482,13 @@ async function handlePrefix(message, commandBody) {
                 { name: '**⚖️ Moderation**', value: '\u200b' },
                 { name: `\`${PREFIX}timeout @user|ID [time] [reason]\``, value: 'Timeout a member. Also: `nu!to`' },
                 { name: `\`${PREFIX}warn @user|ID [reason]\``, value: '1st warn = 10min, 2nd = 1h, 3rd+ = 12h timeout.' },
+                { name: `\`${PREFIX}warns @user|ID\``, value: 'Check a member\'s current warning count.' },
+                { name: `\`${PREFIX}clearwarn @user|ID [amount]\``, value: 'Clear warns. Omit amount to clear all.' },
                 { name: '**⚙️ Config**', value: '\u200b' },
+                { name: `\`${PREFIX}settings\``, value: 'View current bot settings.' },
+                { name: `\`${PREFIX}settings <shiny|rare|regional> lock <true|false>\``, value: 'Toggle a lock type server-wide.' },
+                { name: `\`${PREFIX}channelsettings <shiny|rare|regional> lock <true|false>\``, value: 'Toggle a lock type for the current channel only.' },
                 { name: `\`${PREFIX}setlog #channel\``, value: 'Set the log channel (Admin/Owner only).' },
-                { name: `\`${PREFIX}settings\``, value: 'View current bot settings for this server.' },
                 { name: `\`${PREFIX}remind <time> <reason>\``, value: 'Set a reminder. Supports: 10s, 5m, 1h, 1d.' },
                 { name: '**Slash Commands**', value: '`/setmod` `/moderate` `/timeout` `/warn` `/settings`' },
             )
@@ -483,7 +500,52 @@ async function handlePrefix(message, commandBody) {
 
     // ── settings ──
     if (command === 'settings') {
+        // nu!settings shiny lock true/false
+        const sub = args[1]?.toLowerCase();
+        const lockWord = args[2]?.toLowerCase();
+        const value = args[3]?.toLowerCase();
+
+        const LOCK_TYPES = ['shiny', 'rare', 'regional'];
+        if (LOCK_TYPES.includes(sub) && lockWord === 'lock' && (value === 'true' || value === 'false')) {
+            if (!hasModPermission(message.member, guildData)) return noPerms();
+            if (!guildData.lockTypes) guildData.lockTypes = { rare: true, shiny: true, regional: true };
+            guildData.lockTypes[sub] = value === 'true';
+            saveGuild(message.guild.id, guildData);
+            return message.reply({
+                content: `Server-wide **${sub}** lock is now **${value === 'true' ? 'enabled ✅' : 'disabled ❌'}**.`,
+                allowedMentions: { repliedUser: false },
+            });
+        }
+
         return message.reply({ embeds: [buildSettingsEmbed(guildData, message.guild)], allowedMentions: { repliedUser: false } });
+    }
+
+    // ── channelsettings ──
+    if (command === 'channelsettings') {
+        const sub = args[1]?.toLowerCase();
+        const lockWord = args[2]?.toLowerCase();
+        const value = args[3]?.toLowerCase();
+
+        const LOCK_TYPES = ['shiny', 'rare', 'regional'];
+        if (!LOCK_TYPES.includes(sub) || lockWord !== 'lock' || (value !== 'true' && value !== 'false')) {
+            return message.reply({
+                content: `Usage: \`${PREFIX}channelsettings <shiny|rare|regional> lock <true|false>\`\nApplies to the current channel.`,
+                allowedMentions: { repliedUser: false },
+            });
+        }
+
+        if (!hasModPermission(message.member, guildData)) return noPerms();
+
+        if (!guildData.channelLockTypes) guildData.channelLockTypes = {};
+        if (!guildData.channelLockTypes[message.channel.id]) {
+            guildData.channelLockTypes[message.channel.id] = {};
+        }
+        guildData.channelLockTypes[message.channel.id][sub] = value === 'true';
+        saveGuild(message.guild.id, guildData);
+        return message.reply({
+            content: `**${sub}** lock for <#${message.channel.id}> is now **${value === 'true' ? 'enabled ✅' : 'disabled ❌'}**.`,
+            allowedMentions: { repliedUser: false },
+        });
     }
 
     // ── setlog / log redirect ──
@@ -528,20 +590,16 @@ async function handlePrefix(message, commandBody) {
     if (command === 'timeout' || command === 'to') {
         if (!hasModPermission(message.member, guildData)) return noPerms();
 
-        // Resolve target from mention or raw ID
         let target = message.mentions.members.first();
-        let argOffset = 2; // args after target + command
-        if (!target) {
-            if (args[1] && /^\d+$/.test(args[1])) {
-                target = await message.guild.members.fetch(args[1]).catch(() => null);
-            }
+        if (!target && args[1] && /^\d+$/.test(args[1])) {
+            target = await message.guild.members.fetch(args[1]).catch(() => null);
         }
         if (!target) return message.reply({ content: `Usage: \`${PREFIX}timeout @user [time] [reason]\``, allowedMentions: { repliedUser: false } });
 
+        const argOffset = 2;
         const timeStr = args[argOffset] && /^\d+[smhd]$/.test(args[argOffset]) ? args[argOffset] : '10m';
         const reasonStart = args[argOffset] && /^\d+[smhd]$/.test(args[argOffset]) ? argOffset + 1 : argOffset;
         const reason = args.slice(reasonStart).join(' ') || 'No reason provided';
-
         const ms = parseTime(timeStr);
         if (!ms) return message.reply({ content: 'Invalid time format. Use 10s, 5m, 1h, 1d', allowedMentions: { repliedUser: false } });
 
@@ -556,7 +614,7 @@ async function handlePrefix(message, commandBody) {
         if (!target && args[1] && /^\d+$/.test(args[1])) {
             target = await message.guild.members.fetch(args[1]).catch(() => null);
         }
-        if (!target) return message.reply({ content: `Usage: \`${PREFIX}warn @user [reason]\` or \`${PREFIX}warn userID [reason]\``, allowedMentions: { repliedUser: false } });
+        if (!target) return message.reply({ content: `Usage: \`${PREFIX}warn @user [reason]\``, allowedMentions: { repliedUser: false } });
 
         const reason = args.slice(2).join(' ') || 'No reason provided';
         const count = addWarning(message.guild.id, target.id);
@@ -577,6 +635,57 @@ async function handlePrefix(message, commandBody) {
 
         await sendLog(message.guild.id, warnEmbed);
         return applyTimeout(target, ms, `Warning #${count}: ${reason}`, message.author.id, { message });
+    }
+
+    // ── warns (check) ──
+    if (command === 'warns') {
+        let target = message.mentions.members.first();
+        if (!target && args[1] && /^\d+$/.test(args[1])) {
+            target = await message.guild.members.fetch(args[1]).catch(() => null);
+        }
+        if (!target) return message.reply({ content: `Usage: \`${PREFIX}warns @user\` or \`${PREFIX}warns userID\``, allowedMentions: { repliedUser: false } });
+
+        const count = getWarnings(message.guild.id, target.id);
+        const next = count === 0 ? '1st warn → 10 min timeout'
+            : count === 1 ? '2nd warn → 1h timeout'
+            : count === 2 ? '3rd warn → 12h timeout'
+            : 'Next warn → 12h timeout';
+
+        const embed = new EmbedBuilder()
+            .setTitle('⚠️ Warning Record')
+            .addFields(
+                { name: 'User', value: `<@${target.id}> (${target.user.tag})` },
+                { name: 'Warnings', value: `${count}`, inline: true },
+                { name: 'Next Action', value: next, inline: true },
+            )
+            .setColor(count === 0 ? 0x44FF88 : count < 3 ? 0xFFAA00 : 0xFF4444)
+            .setTimestamp();
+
+        return message.reply({ embeds: [embed], allowedMentions: { repliedUser: false } });
+    }
+
+    // ── clearwarn ──
+    if (command === 'clearwarn') {
+        if (!hasModPermission(message.member, guildData)) return noPerms();
+
+        let target = message.mentions.members.first();
+        if (!target && args[1] && /^\d+$/.test(args[1])) {
+            target = await message.guild.members.fetch(args[1]).catch(() => null);
+        }
+        if (!target) return message.reply({ content: `Usage: \`${PREFIX}clearwarn @user [amount]\``, allowedMentions: { repliedUser: false } });
+
+        const current = getWarnings(message.guild.id, target.id);
+        const amountArg = message.mentions.users.size > 0 ? args[2] : args[2];
+        const amount = amountArg && /^\d+$/.test(amountArg) ? parseInt(amountArg) : null;
+
+        const newCount = amount !== null ? Math.max(0, current - amount) : 0;
+        setWarnings(message.guild.id, target.id, newCount);
+
+        const removed = current - newCount;
+        return message.reply({
+            content: `Cleared **${removed}** warning(s) for <@${target.id}>. They now have **${newCount}** warning(s).`,
+            allowedMentions: { repliedUser: false },
+        });
     }
 
     // ── lock channel (manual) ──
@@ -625,30 +734,34 @@ client.on('messageCreate', async (message) => {
         return;
     }
 
-    // Auto-lock detection from other bots
+    // Auto-lock detection — only from other bots, only in configured channels
     if (botOfflineGuilds.has(message.guild.id)) return;
     if (!message.author.bot) return;
 
     const guildData = getGuild(message.guild.id);
     if (!isChannelMonitored(message.channel, guildData)) return;
 
-    // Collect ALL mentioned user IDs
-    const hunters = [...message.mentions.users.values()].map(u => u.id);
     const content = message.content;
+    const channelId = message.channel.id;
 
     if (content.includes('Shiny hunt pings:') || content.includes('Shiny Hunt pings:')) {
+        if (!isLockEnabled(guildData, channelId, 'shiny')) return;
+        // Extract ONLY the users mentioned on the shiny hunt line — not collection line users
+        const hunters = extractLineIds(content, 'hunt pings:');
         await lockChannel(message.channel, 'shiny', hunters);
-    } else if (content.includes('Collection pings:') || content.includes('Collection Pings:')) {
-        await lockChannel(message.channel, 'collection', hunters);
+
     } else if (content.includes('Rare ping:') || content.includes('Rare Ping:')) {
+        if (!isLockEnabled(guildData, channelId, 'rare')) return;
         await lockChannel(message.channel, 'rare', []);
+
     } else if (content.includes('Regional ping:') || content.includes('Regional Ping:')) {
+        if (!isLockEnabled(guildData, channelId, 'regional')) return;
         await lockChannel(message.channel, 'regional', []);
     }
+    // Collection pings are intentionally not locked
 });
 
 client.on('interactionCreate', async (interaction) => {
-    // Slash commands
     if (interaction.isChatInputCommand()) {
         try {
             await handleSlash(interaction);
@@ -679,7 +792,7 @@ client.on('interactionCreate', async (interaction) => {
         if (!canUnlock && lock?.isHunterType && lock?.hunters.length > 0) {
             canUnlock = lock.hunters.includes(interaction.user.id);
         } else if (!canUnlock && (!lock?.isHunterType || lock?.hunters.length === 0)) {
-            canUnlock = true; // anyone can unlock rare/regional
+            canUnlock = true;
         }
 
         if (!canUnlock) {
@@ -706,11 +819,9 @@ client.on('interactionCreate', async (interaction) => {
             activeLocks.delete(channelId);
         } catch (err) {
             console.error('Unlock error:', err.message);
-            await interaction.reply({ content: 'Failed to unlock the spawn.', ephemeral: true });
+            await interaction.reply({ content: 'Failed to unlock the spawn.', ephemeral: true }).catch(() => {});
         }
-        return;
     }
-
 });
 
 // ─── Ready ────────────────────────────────────────────────────────────────────
